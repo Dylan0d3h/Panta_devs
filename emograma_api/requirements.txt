@@ -1,0 +1,5 @@
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pandas==2.3.3
+requests==2.34.2
+pysus==2.11.2

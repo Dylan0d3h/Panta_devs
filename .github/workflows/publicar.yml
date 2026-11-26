@@ -1,0 +1,142 @@
+# Atualiza os dados do Hemograma e publica o site no FTP, sozinho.
+#
+# Quando roda:
+#   - todo dia 10 do mês: gera de novo os dados de saúde (DATASUS) e publica;
+#   - todo dia, SÓ se a variável QUEIMADAS_RESERVA for "sim": atualiza a reserva de queimadas;
+#   - sempre que você enviar uma alteração do site para o GitHub (branch main): só publica;
+#   - quando você clicar em "Run workflow" na aba Actions (pode escolher o que fazer).
+#
+# Configuração (uma vez só), em Settings > Secrets and variables > Actions:
+#   Secrets:   FTP_SERVIDOR, FTP_USUARIO, FTP_SENHA
+#   Variables: FTP_PASTA (ex: public_html/), ESTADOS (ex: MS MT), QUEIMADAS_RESERVA (sim/não),
+#              FTP_PROTOCOLO (ftp ou ftps; padrão ftp)
+# Passo a passo completo: PUBLICAR_AUTOMATICO.md
+
+name: Atualizar e publicar o site
+
+on:
+  schedule:
+    - cron: "17 9 10 * *"   # dia 10 de cada mês, 06:17 (Brasília): dados de saúde
+    - cron: "43 10 * * *"   # todo dia, 07:43 (Brasília): reserva de queimadas (se ligada)
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      saude:
+        description: "Gerar de novo os dados de saúde (DATASUS)?"
+        type: boolean
+        default: true
+      queimadas:
+        description: "Gerar a reserva de queimadas (últimos 90 dias)?"
+        type: boolean
+        default: false
+
+# Nunca roda duas publicações ao mesmo tempo
+concurrency:
+  group: publicar-site
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # para guardar os dados gerados de volta no repositório
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      SAUDE: ${{ (github.event_name == 'schedule' && github.event.schedule == '17 9 10 * *') || (github.event_name == 'workflow_dispatch' && inputs.saude) }}
+      QUEIMADAS: ${{ (github.event_name == 'schedule' && vars.QUEIMADAS_RESERVA == 'sim') || (github.event_name == 'workflow_dispatch' && inputs.queimadas) }}
+      ESTADOS: ${{ vars.ESTADOS || 'MS MT' }}
+      FTP_CONFIGURADO: ${{ secrets.FTP_SERVIDOR != '' && secrets.FTP_USUARIO != '' && secrets.FTP_SENHA != '' }}
+
+    steps:
+      - name: Pular a execução diária quando a reserva de queimadas está desligada
+        id: pular
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$SAUDE" != "true" ] && [ "$QUEIMADAS" != "true" ]; then
+            echo "Reserva de queimadas desligada (variável QUEIMADAS_RESERVA). Nada a fazer hoje."
+            echo "pular=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.pular.outputs.pular != 'true'
+
+      # ---------------- Dados (Python) ----------------
+
+      - uses: actions/setup-python@v5
+        if: steps.pular.outputs.pular != 'true' && (env.SAUDE == 'true' || env.QUEIMADAS == 'true')
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: emograma_api/requirements.txt
+
+      - name: Instalar o Python do projeto
+        if: steps.pular.outputs.pular != 'true' && (env.SAUDE == 'true' || env.QUEIMADAS == 'true')
+        working-directory: emograma_api
+        run: pip install -r requirements.txt
+
+      - name: Gerar os dados
+        id: dados
+        if: steps.pular.outputs.pular != 'true' && (env.SAUDE == 'true' || env.QUEIMADAS == 'true')
+        continue-on-error: true  # se o DATASUS falhar, publica com os dados anteriores e avisa no fim
+        working-directory: emograma_api
+        run: |
+          opcoes="--estrito --estados $ESTADOS"
+          [ "$SAUDE" = "true" ] || opcoes="$opcoes --sem-saude"
+          [ "$QUEIMADAS" = "true" ] && opcoes="$opcoes --queimadas"
+          echo "python gerar_dados_estaticos.py $opcoes"
+          python gerar_dados_estaticos.py $opcoes
+
+      - name: Guardar os dados no repositório
+        if: steps.pular.outputs.pular != 'true' && (env.SAUDE == 'true' || env.QUEIMADAS == 'true')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pantanaldev/client/public/dados
+          if git diff --cached --quiet; then
+            echo "Os dados não mudaram."
+          else
+            git commit -m "Dados do Hemograma atualizados em $(date -u +%Y-%m-%d)"
+            git pull --rebase
+            git push
+          fi
+
+      # ---------------- Site (Node) ----------------
+
+      - uses: actions/setup-node@v4
+        if: steps.pular.outputs.pular != 'true'
+        with:
+          node-version: 22
+
+      - name: Instalar e gerar o site
+        if: steps.pular.outputs.pular != 'true'
+        working-directory: pantanaldev
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+          npm run build:ftp
+
+      - name: Conferir os dados do FTP
+        if: steps.pular.outputs.pular != 'true' && env.FTP_CONFIGURADO != 'true'
+        run: echo "::warning::FTP ainda não configurado (secrets FTP_SERVIDOR, FTP_USUARIO e FTP_SENHA). O site foi gerado, mas não foi enviado."
+
+      - name: Enviar para o FTP
+        if: steps.pular.outputs.pular != 'true' && env.FTP_CONFIGURADO == 'true'
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVIDOR }}
+          username: ${{ secrets.FTP_USUARIO }}
+          password: ${{ secrets.FTP_SENHA }}
+          protocol: ${{ vars.FTP_PROTOCOLO || 'ftp' }}
+          local-dir: pantanaldev/dist/public/
+          server-dir: ${{ vars.FTP_PASTA || './' }}
+
+      # Se a geração dos dados falhou, o site foi publicado com os dados anteriores.
+      # Esta etapa marca a execução como falha para o GitHub mandar um e-mail de aviso.
+      - name: Avisar se a geração dos dados falhou
+        if: steps.dados.outcome == 'failure'
+        run: |
+          echo "::error::A geração dos dados falhou (veja a etapa 'Gerar os dados'). O site foi publicado com os dados anteriores."
+          exit 1

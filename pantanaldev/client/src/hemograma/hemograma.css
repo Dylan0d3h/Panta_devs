@@ -1,0 +1,13 @@
+/* Estilos só do Hemograma. */
+
+/* Cria uma camada própria para o mapa: assim os controles do Leaflet ficam
+   abaixo do menu fixo do site e dos balões de ajuda. */
+.leaflet-container {
+  font-family: inherit;
+  z-index: 0;
+}
+
+/* Balão dos focos: margens menores que o padrão do Leaflet, para caber no celular */
+.leaflet-popup-content {
+  margin: 10px 12px;
+}

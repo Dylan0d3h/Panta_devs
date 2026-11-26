@@ -1,0 +1,13 @@
+# Nunca enviar para o GitHub
+node_modules/
+dist/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.cache_hemograma/
+.env.local
+.env.development
+.env.development.local
+.DS_Store
+Thumbs.db
